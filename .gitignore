@@ -1,0 +1,17 @@
+node_modules/
+build/
+dist/
+runtime/*.gz
+runtime/codex-package.json
+
+# Local application data and credentials
+settings.json
+quota-cache.json
+.env
+*.log
+
+# Editor and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
