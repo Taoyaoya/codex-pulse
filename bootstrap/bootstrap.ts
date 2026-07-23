@@ -20,7 +20,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 
-const VERSION = "2.0.4";
+const VERSION = "2.1.2";
 const sources = [
   ["AppModels.cs", appModelsFile],
   ["SettingsStore.cs", settingsStoreFile],

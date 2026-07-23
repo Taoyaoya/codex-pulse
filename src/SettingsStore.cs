@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using System.Web.Script.Serialization;
@@ -15,6 +16,7 @@ namespace CodexPulse
         public string DataDirectory { get; private set; }
         public string SettingsPath { get; private set; }
         public string CachePath { get; private set; }
+        public string AccountsDirectory { get; private set; }
 
         public SettingsStore()
         {
@@ -23,7 +25,9 @@ namespace CodexPulse
                 "CodexPulse");
             SettingsPath = Path.Combine(DataDirectory, "settings.json");
             CachePath = Path.Combine(DataDirectory, "quota-cache.json");
+            AccountsDirectory = Path.Combine(DataDirectory, "accounts");
             Directory.CreateDirectory(DataDirectory);
+            Directory.CreateDirectory(AccountsDirectory);
         }
 
         public AppSettings LoadSettings()
@@ -42,6 +46,8 @@ namespace CodexPulse
                 value.RefreshSeconds = Math.Max(15, value.RefreshSeconds);
                 value.Endpoint = value.Endpoint ?? string.Empty;
                 value.AccessToken = value.AccessToken ?? string.Empty;
+                value.ActiveAccountId = value.ActiveAccountId ?? string.Empty;
+                value.Accounts = NormalizeAccounts(value.Accounts);
                 if (value.DemoMode)
                 {
                     value.DemoMode = false;
@@ -61,6 +67,17 @@ namespace CodexPulse
                     value.WindowHeight = 370;
                     SaveSettings(value);
                 }
+                if (value.SettingsVersion < 4)
+                {
+                    value.SettingsVersion = 4;
+                    value.ActiveAccountId = string.Empty;
+                    value.Accounts = new List<AccountProfile>();
+                    SaveSettings(value);
+                }
+                if (value.GetActiveAccount() == null)
+                {
+                    value.ActiveAccountId = value.Accounts.Count == 0 ? string.Empty : value.Accounts[0].Id;
+                }
                 value.WindowWidth = Math.Max(560, value.WindowWidth);
                 value.WindowHeight = Math.Max(320, value.WindowHeight);
                 return value;
@@ -77,27 +94,48 @@ namespace CodexPulse
             WriteAtomically(SettingsPath, serializer.Serialize(value));
         }
 
-        public QuotaSnapshot LoadSnapshot()
+        public QuotaSnapshot LoadSnapshot(string accountId)
         {
             try
             {
-                if (!File.Exists(CachePath))
+                string cachePath = GetAccountCachePath(accountId);
+                if (!File.Exists(cachePath))
                 {
-                    return QuotaSnapshot.Demo();
+                    return QuotaSnapshot.Empty();
                 }
-                QuotaSnapshot value = serializer.Deserialize<QuotaSnapshot>(File.ReadAllText(CachePath, Encoding.UTF8));
-                return value ?? QuotaSnapshot.Demo();
+                QuotaSnapshot value = serializer.Deserialize<QuotaSnapshot>(File.ReadAllText(cachePath, Encoding.UTF8));
+                return value ?? QuotaSnapshot.Empty();
             }
             catch
             {
-                return QuotaSnapshot.Demo();
+                return QuotaSnapshot.Empty();
             }
         }
 
-        public void SaveSnapshot(QuotaSnapshot value)
+        public void SaveSnapshot(string accountId, QuotaSnapshot value)
         {
-            Directory.CreateDirectory(DataDirectory);
-            WriteAtomically(CachePath, serializer.Serialize(value));
+            string cachePath = GetAccountCachePath(accountId);
+            Directory.CreateDirectory(Path.GetDirectoryName(cachePath));
+            WriteAtomically(cachePath, serializer.Serialize(value));
+        }
+
+        public string GetAccountHomeDirectory(string accountId)
+        {
+            return Path.Combine(GetAccountDirectory(accountId), "codex-home");
+        }
+
+        public string GetAccountCachePath(string accountId)
+        {
+            return Path.Combine(GetAccountDirectory(accountId), "quota-cache.json");
+        }
+
+        public void DeleteAccountData(string accountId)
+        {
+            string accountDirectory = GetAccountDirectory(accountId);
+            if (Directory.Exists(accountDirectory))
+            {
+                Directory.Delete(accountDirectory, true);
+            }
         }
 
         public void SetAutoStart(bool enabled, string executablePath)
@@ -131,6 +169,43 @@ namespace CodexPulse
             {
                 File.Move(temporaryPath, targetPath);
             }
+        }
+
+        private string GetAccountDirectory(string accountId)
+        {
+            Guid parsed;
+            if (string.IsNullOrWhiteSpace(accountId)
+                || !Guid.TryParseExact(accountId, "N", out parsed))
+            {
+                throw new ArgumentException("账号标识无效。", "accountId");
+            }
+            return Path.Combine(AccountsDirectory, parsed.ToString("N"));
+        }
+
+        private static List<AccountProfile> NormalizeAccounts(List<AccountProfile> accounts)
+        {
+            List<AccountProfile> result = new List<AccountProfile>();
+            HashSet<string> ids = new HashSet<string>(StringComparer.Ordinal);
+            if (accounts == null)
+            {
+                return result;
+            }
+            foreach (AccountProfile account in accounts)
+            {
+                Guid parsed;
+                if (account == null
+                    || !Guid.TryParseExact(account.Id, "N", out parsed)
+                    || !ids.Add(parsed.ToString("N")))
+                {
+                    continue;
+                }
+                account.Id = parsed.ToString("N");
+                account.DisplayName = account.DisplayName ?? string.Empty;
+                account.Email = account.Email ?? string.Empty;
+                account.PlanType = account.PlanType ?? string.Empty;
+                result.Add(account);
+            }
+            return result;
         }
     }
 }

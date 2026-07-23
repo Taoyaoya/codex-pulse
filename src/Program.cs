@@ -25,7 +25,7 @@ namespace CodexPulse
                     ShutdownMode = ShutdownMode.OnExplicitShutdown
                 };
                 SettingsStore store = new SettingsStore();
-                QuotaApiClient client = new QuotaApiClient();
+                QuotaApiClient client = new QuotaApiClient(store);
                 bool minimized = args.Any(value => string.Equals(value, "--minimized", StringComparison.OrdinalIgnoreCase));
                 using (MainWindow window = new MainWindow(store, client, minimized))
                 {
@@ -36,4 +36,3 @@ namespace CodexPulse
         }
     }
 }
-

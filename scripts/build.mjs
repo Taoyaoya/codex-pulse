@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const version = "2.0.4";
+const version = "2.1.2";
 const buildDir = join(root, "build");
 const distDir = join(root, "dist");
 const brandedRuntime = join(buildDir, "bun-codexpulse.exe");
@@ -47,4 +47,3 @@ execFileSync(bun, [
 execFileSync(process.execPath, [join(root, "tools", "patch-pe-subsystem.mjs"), output], { stdio: "inherit" });
 copyFileSync(output, join(distDir, "CodexPulse.exe"));
 console.log(`Built ${output}`);
-
