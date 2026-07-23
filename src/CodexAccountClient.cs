@@ -20,12 +20,28 @@ namespace CodexPulse
     {
         private readonly object syncRoot = new object();
         private readonly JavaScriptSerializer serializer = new JavaScriptSerializer();
+        private readonly string accountId;
+        private readonly string accountHomeDirectory;
         private Process process;
         private StreamWriter input;
         private StreamReader output;
         private int nextId = 10;
         private string lastDiagnostic = string.Empty;
         private bool disposed;
+
+        public CodexAccountClient(string profileId, string profileHomeDirectory)
+        {
+            if (string.IsNullOrWhiteSpace(profileId))
+            {
+                throw new ArgumentException("账号标识不能为空。", "profileId");
+            }
+            if (string.IsNullOrWhiteSpace(profileHomeDirectory))
+            {
+                throw new ArgumentException("账号目录不能为空。", "profileHomeDirectory");
+            }
+            accountId = profileId;
+            accountHomeDirectory = profileHomeDirectory;
+        }
 
         public Task<QuotaSnapshot> FetchAsync()
         {
@@ -114,7 +130,8 @@ namespace CodexPulse
                     WeeklyTokensUsed = weeklyTokensUsed,
                     HasWeeklyTokenData = hasWeeklyTokenData,
                     AccountEmail = GetString(account, "email"),
-                    PlanType = GetString(account, "planType")
+                    PlanType = GetString(account, "planType"),
+                    AccountId = accountId
                 };
             }
         }
@@ -127,7 +144,7 @@ namespace CodexPulse
                 Dictionary<string, object> parameters = new Dictionary<string, object>
                 {
                     { "type", "chatgpt" },
-                    { "useHostedLoginSuccessPage", true },
+                    { "useHostedLoginSuccessPage", false },
                     { "appBrand", "codex" }
                 };
                 Dictionary<string, object> result = SendRequest("account/login/start", parameters);
@@ -136,7 +153,7 @@ namespace CodexPulse
                 {
                     throw new InvalidOperationException("Codex 登录服务没有返回授权地址。");
                 }
-                Process.Start(new ProcessStartInfo(authUrl) { UseShellExecute = true });
+                OpenBrowser(authUrl);
                 return authUrl;
             }
         }
@@ -153,6 +170,7 @@ namespace CodexPulse
             }
 
             StopProcess();
+            EnsureAccountHome();
             string executable = FindCodexExecutable();
             ProcessStartInfo start = new ProcessStartInfo
             {
@@ -168,6 +186,8 @@ namespace CodexPulse
                 StandardErrorEncoding = Encoding.UTF8
             };
             start.EnvironmentVariables["RUST_LOG"] = "error";
+            start.EnvironmentVariables["CODEX_HOME"] = accountHomeDirectory;
+            start.EnvironmentVariables["CODEX_SQLITE_HOME"] = accountHomeDirectory;
             lastDiagnostic = string.Empty;
             process = new Process { StartInfo = start, EnableRaisingEvents = true };
             try
@@ -192,7 +212,7 @@ namespace CodexPulse
                 {
                     { "name", "codex_pulse" },
                     { "title", "Codex Pulse" },
-                    { "version", "2.0.4" }
+                    { "version", "2.1.2" }
                 };
                 SendRequest("initialize", new Dictionary<string, object> { { "clientInfo", clientInfo } });
                 SendNotification("initialized", new Dictionary<string, object>());
@@ -301,6 +321,35 @@ namespace CodexPulse
                 catch { }
             }
             throw new FileNotFoundException("未找到内置 Codex 运行时，请重新下载完整安装包。");
+        }
+
+        private void EnsureAccountHome()
+        {
+            Directory.CreateDirectory(accountHomeDirectory);
+            string configPath = Path.Combine(accountHomeDirectory, "config.toml");
+            if (!File.Exists(configPath))
+            {
+                File.WriteAllText(
+                    configPath,
+                    "cli_auth_credentials_store = \"file\"\r\n\r\n[history]\r\npersistence = \"none\"\r\n",
+                    new UTF8Encoding(false));
+            }
+        }
+
+        private static void OpenBrowser(string authUrl)
+        {
+            Uri uri;
+            if (!Uri.TryCreate(authUrl, UriKind.Absolute, out uri)
+                || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+            {
+                throw new InvalidOperationException("Codex 登录服务返回了不安全的授权地址。");
+            }
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = authUrl,
+                Verb = "open",
+                UseShellExecute = true
+            });
         }
 
         private static Dictionary<string, object> SelectLongestWindow(

@@ -5,9 +5,12 @@ using System.Reflection;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using System.Windows.Media.Animation;
+using System.Windows.Media.Effects;
 using System.Windows.Threading;
 using Forms = System.Windows.Forms;
 using DrawingColor = System.Drawing.Color;
@@ -92,11 +95,16 @@ namespace CodexPulse
         private TextBlock footerText;
         private Button pinButton;
         private Button accountButton;
+        private Popup accountPopup;
+        private TextBlock accountMenuNotice;
         private AppSettings settings;
         private QuotaSnapshot snapshot;
         private bool refreshing;
+        private long refreshRequestVersion;
+        private string refreshingAccountId;
         private bool loginPolling;
         private DateTime loginPollingEndsAt;
+        private string pendingLoginAccountId;
         private WindowResizeEdge activeResizeEdge;
         private Point resizeStartPoint;
         private double resizeStartLeft;
@@ -111,11 +119,10 @@ namespace CodexPulse
             store = settingsStore;
             apiClient = client;
             settings = store.LoadSettings();
-            snapshot = store.LoadSnapshot();
-            if (!settings.DemoMode && !snapshot.IsLiveAccount)
-            {
-                snapshot = QuotaSnapshot.Empty();
-            }
+            AccountProfile initialAccount = settings.GetActiveAccount();
+            snapshot = initialAccount == null ? QuotaSnapshot.Empty() : store.LoadSnapshot(initialAccount.Id);
+            pendingLoginAccountId = string.Empty;
+            refreshingAccountId = string.Empty;
 
             Title = "Codex Pulse";
             Width = Math.Max(560, settings.WindowWidth);
@@ -203,7 +210,7 @@ namespace CodexPulse
             shell.Child = root;
             Content = shell;
             trayIcon = BuildTrayIcon();
-            UpdateSnapshot(snapshot, settings.DemoMode ? "演示数据" : "等待连接");
+            UpdateSnapshot(snapshot, snapshot.IsAvailable ? "缓存数据" : "等待连接");
 
             refreshTimer = new DispatcherTimer(DispatcherPriority.Background);
             refreshTimer.Tick += delegate { RefreshNow(); };
@@ -262,8 +269,9 @@ namespace CodexPulse
             Grid.SetColumn(liveStatus, 1);
             bar.Children.Add(liveStatus);
 
-            connectButton = Theme.CompactButton("连接账号", "连接当前 ChatGPT/Codex 账号");
-            connectButton.Click += delegate { ConnectAccount(); };
+            connectButton = Theme.CompactButton("添加账号", "添加、切换或管理 ChatGPT/Codex 账号");
+            connectButton.MaxWidth = 150;
+            connectButton.Click += delegate { ShowAccountMenu(); };
             connectButton.MouseLeave += delegate { UpdateAccountButton(); };
             Grid.SetColumn(connectButton, 2);
             bar.Children.Add(connectButton);
@@ -430,28 +438,44 @@ namespace CodexPulse
 
         public void RefreshNow()
         {
-            if (refreshing)
-            {
-                return;
-            }
             if (loginPolling && DateTime.Now > loginPollingEndsAt)
             {
                 loginPolling = false;
+                pendingLoginAccountId = string.Empty;
                 ApplyRefreshInterval();
             }
 
+            AccountProfile activeAccount = settings.GetActiveAccount();
+            if (activeAccount == null)
+            {
+                snapshot = QuotaSnapshot.Empty();
+                UpdateSnapshot(snapshot, "等待连接");
+                return;
+            }
+            string requestAccountId = activeAccount.Id;
+            if (refreshing
+                && string.Equals(refreshingAccountId, requestAccountId, StringComparison.Ordinal))
+            {
+                return;
+            }
+            long requestVersion = ++refreshRequestVersion;
+            AppSettings requestSettings = settings.Clone();
+
             refreshing = true;
-            statusText.Text = "● 同步中";
+            refreshingAccountId = requestAccountId;
+            statusText.Text = "● 正在刷新";
             statusText.Foreground = Theme.Cyan;
+            footerText.Text = "正在刷新“" + ShortAccountLabel(activeAccount.Label) + "”的额度，请稍候…";
+            RefreshOpenAccountMenu();
 
             Task<QuotaSnapshot> task;
             try
             {
-                task = apiClient.FetchAsync(settings.Clone());
+                task = apiClient.FetchAsync(requestSettings);
             }
             catch (Exception exception)
             {
-                RefreshFailed(exception);
+                RefreshFailed(exception, requestAccountId, requestVersion);
                 return;
             }
 
@@ -461,36 +485,63 @@ namespace CodexPulse
                 {
                     if (completed.IsCanceled)
                     {
-                        RefreshFailed(new InvalidOperationException("同步已取消。"));
+                        RefreshFailed(
+                            new InvalidOperationException("同步已取消。"),
+                            requestAccountId,
+                            requestVersion);
                     }
                     else if (completed.IsFaulted)
                     {
                         Exception error = completed.Exception == null ? null : completed.Exception.GetBaseException();
-                        RefreshFailed(error ?? new InvalidOperationException("同步失败。"));
+                        RefreshFailed(
+                            error ?? new InvalidOperationException("同步失败。"),
+                            requestAccountId,
+                            requestVersion);
                     }
                     else
                     {
-                        snapshot = completed.Result;
-                        store.SaveSnapshot(snapshot);
+                        QuotaSnapshot result = completed.Result;
+                        store.SaveSnapshot(requestAccountId, result);
+                        UpdateAccountProfile(requestAccountId, result);
+                        if (!IsCurrentRefresh(requestAccountId, requestVersion))
+                        {
+                            return;
+                        }
+                        snapshot = result;
                         loginPolling = false;
+                        pendingLoginAccountId = string.Empty;
                         ApplyRefreshInterval();
-                        UpdateSnapshot(snapshot, settings.DemoMode ? "演示数据" : "实时数据");
+                        UpdateSnapshot(snapshot, "实时数据");
                         refreshing = false;
+                        refreshingAccountId = string.Empty;
+                        RefreshOpenAccountMenu();
                     }
                 }));
             });
         }
 
-        private void RefreshFailed(Exception error)
+        private bool IsCurrentRefresh(string accountId, long requestVersion)
         {
+            return requestVersion == refreshRequestVersion
+                && string.Equals(refreshingAccountId, accountId, StringComparison.Ordinal)
+                && string.Equals(settings.ActiveAccountId, accountId, StringComparison.Ordinal);
+        }
+
+        private void RefreshFailed(Exception error, string accountId, long requestVersion)
+        {
+            if (!IsCurrentRefresh(accountId, requestVersion))
+            {
+                return;
+            }
             refreshing = false;
+            refreshingAccountId = string.Empty;
+            RefreshOpenAccountMenu();
             CodexLoginRequiredException loginError = error as CodexLoginRequiredException;
             if (loginError != null)
             {
                 statusText.Text = loginPolling ? "● 等待登录" : "● 未连接账号";
                 statusText.Foreground = Theme.Warning;
-                footerText.Text = loginPolling ? "请在浏览器完成登录，应用将自动刷新" : "点击“连接账号”读取你的真实 Codex 额度";
-                accountButton.Content = loginPolling ? "等待登录" : "连接账号";
+                footerText.Text = loginPolling ? "请在浏览器完成登录，应用将自动刷新" : "请添加或重新登录 ChatGPT/Codex 账号";
                 UpdateAccountButton();
                 return;
             }
@@ -507,7 +558,9 @@ namespace CodexPulse
                 quotaDetail.Text = "--";
                 cardValue.Text = "--";
                 cardDetail.Text = "--";
-                footerText.Text = "尚未连接 ChatGPT/Codex 账号";
+                footerText.Text = settings.GetActiveAccount() == null
+                    ? "尚未添加 ChatGPT/Codex 账号"
+                    : "当前账号尚未完成登录";
             }
             else
             {
@@ -537,14 +590,14 @@ namespace CodexPulse
                 {
                     cardValue.Text = string.Format("{0} 次", value.ResetCardsAvailable);
                 }
-                footerText.Text = string.Format("最后更新：{0:HH:mm:ss}", TimeUtil.FromEpochMillis(value.UpdatedAtEpochMillis));
+                string email = string.IsNullOrWhiteSpace(value.AccountEmail) ? string.Empty : value.AccountEmail + " · ";
+                footerText.Text = string.Format("{0}最后更新：{1:HH:mm:ss}", email, TimeUtil.FromEpochMillis(value.UpdatedAtEpochMillis));
             }
 
             UpdateQuotaProgress(value.IsAvailable ? value.RemainingPercent : 0);
 
             statusText.Text = "● " + source;
             statusText.Foreground = source == "实时数据" ? Theme.Emerald : Theme.Violet;
-            accountButton.Content = value.IsLiveAccount ? "账号已连接" : "连接账号";
             UpdateAccountButton();
             trayIcon.Text = ShortMessage(value.IsAvailable
                 ? string.Format("Codex {0}% · 重置卡 {1} 次", value.RemainingPercent, value.ResetCardsAvailable)
@@ -555,16 +608,24 @@ namespace CodexPulse
         {
             if (refreshing)
             {
+                ShowAccountSwitchBlocked();
                 return;
             }
+            AccountProfile account = settings.GetActiveAccount();
+            if (account == null)
+            {
+                AddAccount();
+                return;
+            }
+            string accountId = account.Id;
             settings.DemoMode = false;
-            settings.SettingsVersion = 3;
+            settings.SettingsVersion = 4;
             store.SaveSettings(settings);
             accountButton.Content = "打开浏览器";
             statusText.Text = "● 准备登录";
             statusText.Foreground = Theme.Cyan;
 
-            Task<string> task = apiClient.BeginLoginAsync();
+            Task<string> task = apiClient.BeginLoginAsync(accountId);
             task.ContinueWith(completed =>
             {
                 Dispatcher.BeginInvoke(new Action(delegate
@@ -572,13 +633,21 @@ namespace CodexPulse
                     if (completed.IsFaulted)
                     {
                         Exception error = completed.Exception == null ? null : completed.Exception.GetBaseException();
-                        MessageBox.Show(this, error == null ? "无法启动账号登录。" : error.Message, "Codex Pulse", MessageBoxButton.OK, MessageBoxImage.Warning);
-                        statusText.Text = "● 登录失败";
-                        statusText.Foreground = Theme.Warning;
-                        accountButton.Content = "连接账号";
+                        if (string.Equals(settings.ActiveAccountId, accountId, StringComparison.Ordinal))
+                        {
+                            MessageBox.Show(this, error == null ? "无法启动账号登录。" : error.Message, "Codex Pulse", MessageBoxButton.OK, MessageBoxImage.Warning);
+                            statusText.Text = "● 登录失败";
+                            statusText.Foreground = Theme.Warning;
+                            UpdateAccountButton();
+                        }
+                        return;
+                    }
+                    if (!string.Equals(settings.ActiveAccountId, accountId, StringComparison.Ordinal))
+                    {
                         return;
                     }
                     loginPolling = true;
+                    pendingLoginAccountId = accountId;
                     loginPollingEndsAt = DateTime.Now.AddMinutes(3);
                     refreshTimer.Interval = TimeSpan.FromSeconds(5);
                     statusText.Text = "● 等待登录";
@@ -587,6 +656,442 @@ namespace CodexPulse
                     footerText.Text = "请在浏览器完成登录，应用将自动刷新";
                 }));
             });
+        }
+
+        private void ShowAccountMenu()
+        {
+            if (accountPopup != null && accountPopup.IsOpen)
+            {
+                accountPopup.IsOpen = false;
+                return;
+            }
+
+            accountPopup = new Popup
+            {
+                PlacementTarget = accountButton,
+                Placement = PlacementMode.Bottom,
+                AllowsTransparency = true,
+                PopupAnimation = PopupAnimation.Fade,
+                StaysOpen = false,
+                HorizontalOffset = Math.Min(0, accountButton.ActualWidth - 440),
+                VerticalOffset = 6
+            };
+            accountPopup.Child = BuildAccountMenuPanel();
+            accountPopup.Closed += delegate
+            {
+                accountMenuNotice = null;
+                accountPopup = null;
+            };
+            accountPopup.IsOpen = true;
+        }
+
+        private Border BuildAccountMenuPanel()
+        {
+            Border panel = new Border
+            {
+                Width = 440,
+                MaxHeight = 510,
+                Padding = new Thickness(12),
+                CornerRadius = new CornerRadius(18),
+                Background = Theme.CardGlass(false),
+                BorderBrush = Theme.BrushFrom("#B58B7CFF"),
+                BorderThickness = new Thickness(1.5),
+                Effect = new DropShadowEffect
+                {
+                    Color = ((SolidColorBrush)Theme.BrushFrom("#C0000000")).Color,
+                    BlurRadius = 24,
+                    ShadowDepth = 8,
+                    Opacity = 0.65
+                }
+            };
+            StackPanel content = new StackPanel();
+
+            TextBlock title = Theme.Text("账号", 12, Theme.MutedText, FontWeights.SemiBold);
+            title.Margin = new Thickness(8, 2, 8, 8);
+            content.Children.Add(title);
+
+            StackPanel accounts = new StackPanel();
+            if (settings.Accounts != null)
+            {
+                foreach (AccountProfile profile in settings.Accounts)
+                {
+                    AccountProfile account = profile;
+                    bool selected = string.Equals(account.Id, settings.ActiveAccountId, StringComparison.Ordinal);
+                    QuotaSnapshot accountSnapshot = selected ? snapshot : store.LoadSnapshot(account.Id);
+                    bool loading = refreshing
+                        && string.Equals(refreshingAccountId, account.Id, StringComparison.Ordinal);
+                    accounts.Children.Add(BuildAccountRow(account, accountSnapshot, selected, loading));
+                }
+            }
+
+            ScrollViewer accountScroller = new ScrollViewer
+            {
+                Content = accounts,
+                MaxHeight = 340,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled
+            };
+            content.Children.Add(accountScroller);
+
+            accountMenuNotice = Theme.Text(
+                "额度刷新中，请稍后再切换账号",
+                12,
+                Theme.Warning,
+                FontWeights.Normal);
+            accountMenuNotice.HorizontalAlignment = HorizontalAlignment.Center;
+            accountMenuNotice.Margin = new Thickness(8, 8, 8, 0);
+            accountMenuNotice.Visibility = refreshing ? Visibility.Visible : Visibility.Collapsed;
+            content.Children.Add(accountMenuNotice);
+
+            Border separator = new Border
+            {
+                Height = 1,
+                Background = Theme.BrushFrom("#547B83AC"),
+                Margin = new Thickness(4, 11, 4, 9)
+            };
+            content.Children.Add(separator);
+
+            Grid actions = new Grid();
+            actions.ColumnDefinitions.Add(new ColumnDefinition());
+            actions.ColumnDefinitions.Add(new ColumnDefinition());
+            actions.ColumnDefinitions.Add(new ColumnDefinition());
+            Button add = AccountActionButton("＋  添加账号");
+            add.Click += delegate { AddAccount(); };
+            actions.Children.Add(add);
+
+            Button login = AccountActionButton("↻  重新登录");
+            login.IsEnabled = settings.GetActiveAccount() != null;
+            login.Click += delegate { ConnectAccount(); };
+            Grid.SetColumn(login, 1);
+            actions.Children.Add(login);
+
+            Button remove = AccountActionButton("−  移除账号");
+            remove.Foreground = Theme.Warning;
+            remove.IsEnabled = settings.GetActiveAccount() != null;
+            remove.Click += delegate { RemoveActiveAccount(); };
+            Grid.SetColumn(remove, 2);
+            actions.Children.Add(remove);
+            content.Children.Add(actions);
+
+            panel.Child = content;
+            return panel;
+        }
+
+        private Border BuildAccountRow(
+            AccountProfile account,
+            QuotaSnapshot accountSnapshot,
+            bool selected,
+            bool loading)
+        {
+            Brush restingBackground = loading
+                ? Theme.BrushFrom("#583B3C71")
+                : (selected ? Theme.BrushFrom("#3D2C6B67") : Theme.BrushFrom("#24191D3A"));
+            Border row = new Border
+            {
+                Background = restingBackground,
+                BorderBrush = loading
+                    ? Theme.BrushFrom("#8F8B7CFF")
+                    : (selected ? Theme.BrushFrom("#8139E6AE") : Theme.BrushFrom("#3E7B83AC")),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(13),
+                Padding = new Thickness(12, 10, 12, loading ? 11 : 10),
+                Margin = new Thickness(0, 0, 0, 7),
+                Cursor = Cursors.Hand,
+                ToolTip = string.IsNullOrWhiteSpace(account.Email) ? "账号尚未完成登录" : account.Email
+            };
+            row.MouseEnter += delegate { row.Background = Theme.BrushFrom("#62434B7A"); };
+            row.MouseLeave += delegate { row.Background = restingBackground; };
+            row.MouseLeftButtonUp += delegate { SwitchAccount(account.Id); };
+
+            Grid content = new Grid();
+            content.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            if (loading)
+            {
+                content.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            }
+
+            Grid heading = new Grid();
+            heading.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(30) });
+            heading.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(42) });
+            heading.ColumnDefinitions.Add(new ColumnDefinition());
+            heading.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+            TextBlock selection = Theme.Text(selected ? "✓" : string.Empty, 21, Theme.Emerald, FontWeights.SemiBold);
+            selection.HorizontalAlignment = HorizontalAlignment.Center;
+            heading.Children.Add(selection);
+
+            Border avatar = new Border
+            {
+                Width = 34,
+                Height = 34,
+                CornerRadius = new CornerRadius(17),
+                Background = selected ? Theme.BrushFrom("#5840D6BD") : Theme.BrushFrom("#685E50C8"),
+                BorderBrush = selected ? Theme.Emerald : Theme.Violet,
+                BorderThickness = new Thickness(1)
+            };
+            string label = account.Label;
+            avatar.Child = Theme.Text(
+                string.IsNullOrWhiteSpace(label) ? "?" : label.Substring(0, 1).ToUpperInvariant(),
+                15,
+                Theme.PrimaryText,
+                FontWeights.SemiBold);
+            ((TextBlock)avatar.Child).HorizontalAlignment = HorizontalAlignment.Center;
+            Grid.SetColumn(avatar, 1);
+            heading.Children.Add(avatar);
+
+            TextBlock accountLabel = Theme.Text(ShortAccountLabel(account.Label), 14, Theme.PrimaryText, FontWeights.SemiBold);
+            accountLabel.Margin = new Thickness(9, 0, 8, 0);
+            Grid.SetColumn(accountLabel, 2);
+            heading.Children.Add(accountLabel);
+
+            string quotaText = accountSnapshot != null && accountSnapshot.IsAvailable
+                ? accountSnapshot.RemainingPercent + "%"
+                : "--";
+            Border quotaPill = new Border
+            {
+                Background = Theme.BrushFrom("#3D39E6AE"),
+                BorderBrush = Theme.BrushFrom("#7039E6AE"),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(12),
+                Padding = new Thickness(10, 3, 10, 3)
+            };
+            quotaPill.Child = Theme.Text(quotaText, 13, Theme.Emerald, FontWeights.SemiBold);
+            Grid.SetColumn(quotaPill, 3);
+            heading.Children.Add(quotaPill);
+            content.Children.Add(heading);
+
+            if (loading)
+            {
+                StackPanel loadingPanel = new StackPanel { Margin = new Thickness(72, 8, 2, 0) };
+                TextBlock loadingText = Theme.Text("正在刷新额度信息，请稍候…", 12, Theme.SecondaryText, FontWeights.Normal);
+                loadingPanel.Children.Add(loadingText);
+
+                Border progressTrack = new Border
+                {
+                    Height = 5,
+                    Background = Theme.BrushFrom("#5530385E"),
+                    CornerRadius = new CornerRadius(3),
+                    Margin = new Thickness(0, 7, 0, 0),
+                    ClipToBounds = true
+                };
+                LinearGradientBrush progressBrush = new LinearGradientBrush();
+                progressBrush.StartPoint = new Point(0, 0.5);
+                progressBrush.EndPoint = new Point(1, 0.5);
+                progressBrush.GradientStops.Add(new GradientStop(((SolidColorBrush)Theme.Cyan).Color, 0));
+                progressBrush.GradientStops.Add(new GradientStop(((SolidColorBrush)Theme.Violet).Color, 0.72));
+                progressBrush.GradientStops.Add(new GradientStop(((SolidColorBrush)Theme.Emerald).Color, 1));
+                Border progress = new Border
+                {
+                    Width = 90,
+                    HorizontalAlignment = HorizontalAlignment.Left,
+                    Background = progressBrush,
+                    CornerRadius = new CornerRadius(3)
+                };
+                progressTrack.Child = progress;
+                loadingPanel.Children.Add(progressTrack);
+                progress.BeginAnimation(
+                    FrameworkElement.WidthProperty,
+                    new DoubleAnimation
+                    {
+                        From = 55,
+                        To = 310,
+                        Duration = TimeSpan.FromSeconds(1.25),
+                        AutoReverse = true,
+                        RepeatBehavior = RepeatBehavior.Forever
+                    });
+                Grid.SetRow(loadingPanel, 1);
+                content.Children.Add(loadingPanel);
+            }
+
+            row.Child = content;
+            return row;
+        }
+
+        private static Button AccountActionButton(string text)
+        {
+            Button button = Theme.CompactButton(text, text);
+            button.MinWidth = 0;
+            button.Height = 34;
+            button.Margin = new Thickness(2, 0, 2, 0);
+            button.Padding = new Thickness(6, 0, 6, 0);
+            button.BorderBrush = Theme.BrushFrom("#357B83AC");
+            return button;
+        }
+
+        private void RefreshOpenAccountMenu()
+        {
+            if (accountPopup == null || !accountPopup.IsOpen)
+            {
+                return;
+            }
+            accountPopup.Child = BuildAccountMenuPanel();
+        }
+
+        private void ShowAccountSwitchBlocked()
+        {
+            const string message = "额度刷新中，请稍后再切换账号";
+            statusText.Text = "● 额度刷新中";
+            statusText.Foreground = Theme.Cyan;
+            footerText.Text = message;
+            if (accountMenuNotice != null)
+            {
+                accountMenuNotice.Text = message;
+                accountMenuNotice.Visibility = Visibility.Visible;
+            }
+        }
+
+        private void AddAccount()
+        {
+            if (refreshing)
+            {
+                ShowAccountSwitchBlocked();
+                return;
+            }
+            AccountProfile account = new AccountProfile
+            {
+                Id = Guid.NewGuid().ToString("N"),
+                DisplayName = "新账号 " + (settings.Accounts.Count + 1),
+                CreatedAtEpochMillis = TimeUtil.NowEpochMillis(),
+                LastUsedAtEpochMillis = TimeUtil.NowEpochMillis()
+            };
+            settings.Accounts.Add(account);
+            settings.ActiveAccountId = account.Id;
+            settings.SettingsVersion = 4;
+            store.SaveSettings(settings);
+            snapshot = QuotaSnapshot.Empty();
+            snapshot.AccountId = account.Id;
+            UpdateSnapshot(snapshot, "等待登录");
+            ConnectAccount();
+        }
+
+        private void SwitchAccount(string accountId)
+        {
+            if (string.IsNullOrWhiteSpace(accountId))
+            {
+                return;
+            }
+            if (string.Equals(settings.ActiveAccountId, accountId, StringComparison.Ordinal))
+            {
+                return;
+            }
+            if (refreshing)
+            {
+                ShowAccountSwitchBlocked();
+                return;
+            }
+            AccountProfile account = settings.Accounts.Find(delegate(AccountProfile value)
+            {
+                return value != null && string.Equals(value.Id, accountId, StringComparison.Ordinal);
+            });
+            if (account == null)
+            {
+                return;
+            }
+            if (accountPopup != null)
+            {
+                accountPopup.IsOpen = false;
+            }
+            settings.ActiveAccountId = account.Id;
+            account.LastUsedAtEpochMillis = TimeUtil.NowEpochMillis();
+            settings.SettingsVersion = 4;
+            store.SaveSettings(settings);
+            loginPolling = false;
+            pendingLoginAccountId = string.Empty;
+            ApplyRefreshInterval();
+            snapshot = store.LoadSnapshot(account.Id);
+            UpdateSnapshot(snapshot, snapshot.IsAvailable ? "缓存数据" : "等待连接");
+            RefreshNow();
+        }
+
+        private void RemoveActiveAccount()
+        {
+            if (refreshing)
+            {
+                ShowAccountSwitchBlocked();
+                return;
+            }
+            AccountProfile account = settings.GetActiveAccount();
+            if (account == null)
+            {
+                return;
+            }
+            MessageBoxResult answer = MessageBox.Show(
+                this,
+                "确定移除“" + account.Label + "”吗？\n\n这会删除 Codex Pulse 为该账号保存的本地登录信息，不会注销或删除 ChatGPT 账号。",
+                "移除账号",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Question);
+            if (answer != MessageBoxResult.Yes)
+            {
+                return;
+            }
+
+            apiClient.RemoveAccount(account.Id);
+            try
+            {
+                store.DeleteAccountData(account.Id);
+            }
+            catch (Exception error)
+            {
+                MessageBox.Show(this, error.Message, "无法移除账号", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+            settings.Accounts.RemoveAll(delegate(AccountProfile value)
+            {
+                return value != null && string.Equals(value.Id, account.Id, StringComparison.Ordinal);
+            });
+            settings.ActiveAccountId = settings.Accounts.Count == 0 ? string.Empty : settings.Accounts[0].Id;
+            settings.SettingsVersion = 4;
+            store.SaveSettings(settings);
+            loginPolling = false;
+            pendingLoginAccountId = string.Empty;
+            snapshot = settings.GetActiveAccount() == null
+                ? QuotaSnapshot.Empty()
+                : store.LoadSnapshot(settings.ActiveAccountId);
+            UpdateSnapshot(snapshot, snapshot.IsAvailable ? "缓存数据" : "等待连接");
+            if (settings.GetActiveAccount() != null)
+            {
+                RefreshNow();
+            }
+        }
+
+        private void UpdateAccountProfile(string accountId, QuotaSnapshot value)
+        {
+            AccountProfile account = settings.Accounts.Find(delegate(AccountProfile profile)
+            {
+                return profile != null && string.Equals(profile.Id, accountId, StringComparison.Ordinal);
+            });
+            if (account == null)
+            {
+                return;
+            }
+            account.Email = value.AccountEmail ?? string.Empty;
+            account.PlanType = value.PlanType ?? string.Empty;
+            if (!string.IsNullOrWhiteSpace(account.Email))
+            {
+                account.DisplayName = account.Email;
+            }
+            account.LastUsedAtEpochMillis = TimeUtil.NowEpochMillis();
+            settings.SettingsVersion = 4;
+            store.SaveSettings(settings);
+        }
+
+        private static string ShortAccountLabel(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return "未连接账号";
+            }
+            return value.Length <= 26 ? value : value.Substring(0, 23) + "…";
+        }
+
+        private static string ShortAccountButtonLabel(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return "未连接账号";
+            }
+            return value.Length <= 16 ? value : value.Substring(0, 13) + "…";
         }
 
         private void OpenSettings()
@@ -606,9 +1111,14 @@ namespace CodexPulse
                 }
                 ApplyRefreshInterval();
                 ApplyAlwaysOnTop(settings.AlwaysOnTop, false);
-                if (!settings.DemoMode && !snapshot.IsLiveAccount)
+                if (!snapshot.IsLiveAccount)
                 {
                     snapshot = QuotaSnapshot.Empty();
+                    AccountProfile active = settings.GetActiveAccount();
+                    if (active != null)
+                    {
+                        snapshot.AccountId = active.Id;
+                    }
                     UpdateSnapshot(snapshot, "等待连接");
                 }
                 RefreshNow();
@@ -629,7 +1139,7 @@ namespace CodexPulse
             Topmost = enabled;
             if (persist)
             {
-                settings.SettingsVersion = 3;
+                settings.SettingsVersion = 4;
                 store.SaveSettings(settings);
             }
             UpdatePinVisual();
@@ -758,7 +1268,7 @@ namespace CodexPulse
             Cursor = Cursors.Arrow;
             settings.WindowWidth = Math.Max(MinWidth, ActualWidth);
             settings.WindowHeight = Math.Max(MinHeight, ActualHeight);
-            settings.SettingsVersion = 3;
+            settings.SettingsVersion = 4;
             try
             {
                 store.SaveSettings(settings);
@@ -829,6 +1339,22 @@ namespace CodexPulse
                 return;
             }
             bool connected = snapshot != null && snapshot.IsLiveAccount;
+            AccountProfile active = settings.GetActiveAccount();
+            if (active == null)
+            {
+                accountButton.Content = "添加账号";
+            }
+            else if (loginPolling && string.Equals(pendingLoginAccountId, active.Id, StringComparison.Ordinal))
+            {
+                accountButton.Content = "等待登录 ▾";
+            }
+            else
+            {
+                accountButton.Content = ShortAccountButtonLabel(active.Label) + " ▾";
+            }
+            accountButton.ToolTip = active == null
+                ? "添加 ChatGPT/Codex 账号"
+                : "当前账号：" + active.Label + "\n点击切换或管理账号";
             accountButton.Foreground = connected ? Theme.Emerald : Theme.SecondaryText;
             accountButton.Background = connected ? Theme.BrushFrom("#4139E6AE") : Brushes.Transparent;
             accountButton.BorderBrush = connected ? Theme.BrushFrom("#7339E6AE") : Theme.Border;
@@ -856,14 +1382,14 @@ namespace CodexPulse
             };
             Forms.ToolStripMenuItem show = new Forms.ToolStripMenuItem("显示 / 隐藏");
             Forms.ToolStripMenuItem refresh = new Forms.ToolStripMenuItem("立即刷新");
-            Forms.ToolStripMenuItem connect = new Forms.ToolStripMenuItem("连接 ChatGPT 账号");
+            Forms.ToolStripMenuItem connect = new Forms.ToolStripMenuItem("添加 / 切换账号");
             trayPinItem = new Forms.ToolStripMenuItem("窗口始终置顶");
             trayPinItem.CheckOnClick = false;
             Forms.ToolStripMenuItem configure = new Forms.ToolStripMenuItem("设置");
             Forms.ToolStripMenuItem exit = new Forms.ToolStripMenuItem("退出");
             show.Click += delegate { Dispatcher.BeginInvoke(new Action(ToggleVisibility)); };
             refresh.Click += delegate { Dispatcher.BeginInvoke(new Action(RefreshNow)); };
-            connect.Click += delegate { Dispatcher.BeginInvoke(new Action(delegate { ShowFromTray(); ConnectAccount(); })); };
+            connect.Click += delegate { Dispatcher.BeginInvoke(new Action(delegate { ShowFromTray(); ShowAccountMenu(); })); };
             trayPinItem.Click += delegate { Dispatcher.BeginInvoke(new Action(delegate { ApplyAlwaysOnTop(!settings.AlwaysOnTop, true); })); };
             configure.Click += delegate { Dispatcher.BeginInvoke(new Action(delegate { ShowFromTray(); OpenSettings(); })); };
             exit.Click += delegate { Dispatcher.BeginInvoke(new Action(ExitApplication)); };

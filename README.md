@@ -9,6 +9,9 @@ Codex Pulse 是一个 Windows 桌面额度监控应用，用于查看当前 Code
 - 具体额度重置日期与时间
 - 可用重置卡次数
 - ChatGPT/Codex 账号登录和自动同步
+- 多账号独立登录、额度缓存与账号切换
+- 紫黑玻璃账号面板及刷新进度提示
+- 刷新期间锁定账号切换并给出明确提示
 - 窗口置顶、边缘缩放和托盘运行
 - 半透明圆角玻璃界面
 - 与主界面一致的深色托盘菜单
@@ -29,7 +32,7 @@ npm run build
 构建结果：
 
 ```text
-dist/CodexPulse-v2.0.4.exe
+dist/CodexPulse-v2.1.2.exe
 dist/CodexPulse.exe
 ```
 
@@ -44,4 +47,3 @@ dist/CodexPulse.exe
 ```
 
 这些本地文件不会被提交到仓库。
-

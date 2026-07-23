@@ -1,6 +1,6 @@
 {
   "name": "codex-pulse",
-  "version": "2.0.4",
+  "version": "2.1.2",
   "private": true,
   "description": "Windows desktop monitor for Codex quota and reset cards",
   "type": "module",
@@ -18,4 +18,3 @@
     "node": ">=20"
   }
 }
-

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import * as PE from "pe-library";
 import * as ResEdit from "resedit";
 
-const [sourcePath, destinationPath, iconPath, version = "2.0.4"] = process.argv.slice(2);
+const [sourcePath, destinationPath, iconPath, version = "2.1.2"] = process.argv.slice(2);
 if (!sourcePath || !destinationPath || !iconPath) {
   throw new Error("用法：node brand-runtime.mjs <源EXE> <目标EXE> <ICO> [版本]");
 }

@@ -17,6 +17,8 @@ namespace CodexPulse
         private readonly Dictionary<int, Button> refreshButtons = new Dictionary<int, Button>();
         private readonly double savedWindowWidth;
         private readonly double savedWindowHeight;
+        private readonly string initialActiveAccountId;
+        private readonly List<AccountProfile> initialAccounts;
         private int selectedRefreshSeconds;
 
         public AppSettings Result { get; private set; }
@@ -25,6 +27,9 @@ namespace CodexPulse
         {
             savedWindowWidth = initial.WindowWidth;
             savedWindowHeight = initial.WindowHeight;
+            AppSettings accountSettings = initial.Clone();
+            initialActiveAccountId = accountSettings.ActiveAccountId;
+            initialAccounts = accountSettings.Accounts;
             selectedRefreshSeconds = IsKnownInterval(initial.RefreshSeconds) ? initial.RefreshSeconds : 60;
 
             Title = "Codex Pulse 设置";
@@ -218,7 +223,7 @@ namespace CodexPulse
         {
             Result = new AppSettings
             {
-                SettingsVersion = 3,
+                SettingsVersion = 4,
                 DemoMode = false,
                 Endpoint = string.Empty,
                 AccessToken = string.Empty,
@@ -228,7 +233,9 @@ namespace CodexPulse
                 WidgetMode = false,
                 AlwaysOnTop = alwaysOnTop.IsChecked == true,
                 WindowWidth = savedWindowWidth,
-                WindowHeight = savedWindowHeight
+                WindowHeight = savedWindowHeight,
+                ActiveAccountId = initialActiveAccountId,
+                Accounts = initialAccounts
             };
             DialogResult = true;
         }

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 namespace CodexPulse
 {
@@ -15,10 +16,12 @@ namespace CodexPulse
         public bool AlwaysOnTop { get; set; }
         public double WindowWidth { get; set; }
         public double WindowHeight { get; set; }
+        public string ActiveAccountId { get; set; }
+        public List<AccountProfile> Accounts { get; set; }
 
         public AppSettings()
         {
-            SettingsVersion = 3;
+            SettingsVersion = 4;
             DemoMode = false;
             Endpoint = string.Empty;
             AccessToken = string.Empty;
@@ -29,6 +32,8 @@ namespace CodexPulse
             AlwaysOnTop = false;
             WindowWidth = 660;
             WindowHeight = 370;
+            ActiveAccountId = string.Empty;
+            Accounts = new List<AccountProfile>();
         }
 
         public AppSettings Clone()
@@ -45,7 +50,81 @@ namespace CodexPulse
                 WidgetMode = WidgetMode,
                 AlwaysOnTop = AlwaysOnTop,
                 WindowWidth = WindowWidth,
-                WindowHeight = WindowHeight
+                WindowHeight = WindowHeight,
+                ActiveAccountId = ActiveAccountId,
+                Accounts = CloneAccounts(Accounts)
+            };
+        }
+
+        public AccountProfile GetActiveAccount()
+        {
+            if (Accounts == null || string.IsNullOrWhiteSpace(ActiveAccountId))
+            {
+                return null;
+            }
+            return Accounts.Find(delegate(AccountProfile account)
+            {
+                return account != null && string.Equals(account.Id, ActiveAccountId, StringComparison.Ordinal);
+            });
+        }
+
+        private static List<AccountProfile> CloneAccounts(List<AccountProfile> accounts)
+        {
+            List<AccountProfile> result = new List<AccountProfile>();
+            if (accounts == null)
+            {
+                return result;
+            }
+            foreach (AccountProfile account in accounts)
+            {
+                if (account != null)
+                {
+                    result.Add(account.Clone());
+                }
+            }
+            return result;
+        }
+    }
+
+    public sealed class AccountProfile
+    {
+        public string Id { get; set; }
+        public string DisplayName { get; set; }
+        public string Email { get; set; }
+        public string PlanType { get; set; }
+        public long CreatedAtEpochMillis { get; set; }
+        public long LastUsedAtEpochMillis { get; set; }
+
+        public AccountProfile()
+        {
+            Id = string.Empty;
+            DisplayName = string.Empty;
+            Email = string.Empty;
+            PlanType = string.Empty;
+            CreatedAtEpochMillis = TimeUtil.NowEpochMillis();
+            LastUsedAtEpochMillis = CreatedAtEpochMillis;
+        }
+
+        public string Label
+        {
+            get
+            {
+                if (!string.IsNullOrWhiteSpace(DisplayName)) return DisplayName;
+                if (!string.IsNullOrWhiteSpace(Email)) return Email;
+                return "未连接账号";
+            }
+        }
+
+        public AccountProfile Clone()
+        {
+            return new AccountProfile
+            {
+                Id = Id,
+                DisplayName = DisplayName,
+                Email = Email,
+                PlanType = PlanType,
+                CreatedAtEpochMillis = CreatedAtEpochMillis,
+                LastUsedAtEpochMillis = LastUsedAtEpochMillis
             };
         }
     }
@@ -67,6 +146,7 @@ namespace CodexPulse
         public bool HasWeeklyTokenData { get; set; }
         public string AccountEmail { get; set; }
         public string PlanType { get; set; }
+        public string AccountId { get; set; }
 
         public static QuotaSnapshot Demo()
         {
@@ -86,7 +166,8 @@ namespace CodexPulse
                 WeeklyTokensUsed = 34820,
                 HasWeeklyTokenData = true,
                 AccountEmail = string.Empty,
-                PlanType = "demo"
+                PlanType = "demo",
+                AccountId = string.Empty
             };
         }
 
@@ -102,7 +183,8 @@ namespace CodexPulse
                 IsAvailable = false,
                 HasWeeklyTokenData = false,
                 AccountEmail = string.Empty,
-                PlanType = string.Empty
+                PlanType = string.Empty,
+                AccountId = string.Empty
             };
         }
     }
