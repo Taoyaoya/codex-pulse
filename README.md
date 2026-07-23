@@ -2,6 +2,10 @@
 
 Codex Pulse 是一个 Windows 桌面额度监控应用，用于查看当前 Codex 每周额度、Token 用量、重置时间和可用重置卡次数。
 
+## 下载
+
+[下载最新 Windows x64 版本](https://github.com/Taoyaoya/codex-pulse/releases/latest/download/CodexPulse-v2.1.2.exe)
+
 ## 功能
 
 - Codex 每周剩余额度进度条
