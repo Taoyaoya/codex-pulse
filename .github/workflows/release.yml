@@ -37,7 +37,7 @@ jobs:
           $tag = "v$version"
           $asset = "dist/CodexPulse-$tag.exe"
           if (gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null) {
-            gh release upload $tag $asset --clobber --repo $env:GITHUB_REPOSITORY
+            Write-Host "Release $tag already exists; skipping publication."
           } else {
             gh release create $tag $asset `
               --repo $env:GITHUB_REPOSITORY `
